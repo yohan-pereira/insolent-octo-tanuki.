@@ -11,6 +11,7 @@ from libmproxy.proxy.server import ProxyServer
 import pprint
 import copy
 import re
+from datetime import datetime
 
 
 def cookie_name(cookie):
@@ -25,24 +26,44 @@ def update_value(cookie, value):
     components[0] = str(name) + "=" + str(value) 
     return ";".join(components)
 
-#def update_value_2(cookie, value):
-#    name = cookie_name (cookie)
-#    p = re.compile(r"\W*" + re.escape(name) + "\W*=\W*"
-#    re.sub(r""+re.escape(name)+
-#
+def is_expired(cookie):
+    cookie_l = cookie.lower()
+    if not ("expiry" in cookie_l or "max-age" in cookie_l):
+        return False
+    attrs = cookie_atrs_to_map(cookie)
+    if "max-age" in attrs:
+        max_age = int(attrs["max-age"].strip())
+        return max_age < 0
+    elif "expires" in attrs:
+        expiry_date = datetime.strptime(attrs["expires"].strip(), "%a, %d-%b-%Y %H:%M:%S %Z")
+        return expiry_date < datetime.now()
+    else :
+        return False
 
-
+#converts a list of cookies to a map of the form cookie_name -> cookie_string
 def mapify(cookies):
-   cookie_names = map(cookie_name, cookies) 
-   return dict(zip(cookie_names, cookies))
+    cookie_names = map(lambda c: cookie_name(c).lower(), cookies) 
+    return dict(zip(cookie_names, cookies))
 
-def update(cookies, browser_cookies):
+#converts a cookie into a map, ignoring attributes without values
+def cookie_atrs_to_map(cookie):
+    return dict(map(lambda string: [cookie_name(string).lower(), browser_cookie_value(string)], filter(lambda string: "=" in string, cookie.split(";"))[1:]))
+
+def update_server_cookies(cookies, server_cookies):
+    cookies.update(mapify(server_cookies))
+    for expired_cookie in map(cookie_name, filter(is_expired, server_cookies)):
+        print ("deleting expired cookie", expired_cookie)
+        del cookies[expired_cookie]
+    
+    
+
+def update_cookie_values(cookies, browser_cookies):
     new_cookies = mapify(browser_cookies[0].split(";"))
     for cookie_name in new_cookies:
         if cookie_name in cookies:
             cookie = cookies[cookie_name]
             cookies[cookie_name] = update_value(cookie, browser_cookie_value(new_cookies[cookie_name]))
-            #print "updating cookie "+cookie_name+" with new value " + browser_cookie_value(new_cookies[cookie_name])
+            print "updating cookie "+cookie_name+" with new value " + browser_cookie_value(new_cookies[cookie_name])
         #else :
         #    print "adding new cookie "+cookie_name+" with value " + new_cookies[cookie_name]
         #    cookies[cookie_name] = new_cookies[cookie_name]
@@ -79,7 +100,7 @@ class StickyMaster(controller.Master):
             #self.stickyhosts[hid] = mapify(flow.request.headers["cookie"])
             #self.stickyhosts[hid] = flow.request.headers["cookie"]
             #print ("not reseting browser cookies for ", flow.request.host, flow.request.headers["cookie"])
-            update(self.stickyhosts[hid], flow.request.headers["cookie"])
+            update_cookie_values(self.stickyhosts[hid], flow.request.headers["cookie"])
         elif hid in self.stickyhosts:
             print ("forwarding cookies for ", flow.request.host, flow.request.port, self.stickyhosts[hid])
             #cookies = self.stickyhosts[hid]
@@ -97,14 +118,12 @@ class StickyMaster(controller.Master):
         print("resopnse ",flow.request.host, flow.request.port, flow.id)
         last_cookies_sent = self.relay.pop(flow.id, None)
         if flow.response.headers["set-cookie"]:
-            persistant_cookies = flow.response.headers["set-cookie"] #filter(lambda cookie: "expires" in cookie, flow.response.headers["set-cookie"])
-            if persistant_cookies:
-                if not hid in self.stickyhosts:
-                    self.stickyhosts[hid] = {}
-                self.stickyhosts[hid].update(mapify(flow.response.headers["set-cookie"]))
-                flow.response.headers["set-cookie"] = copy.copy(self.stickyhosts[hid].values())
-                #self.stickyhosts[hid] = flow.response.headers["set-cookie"]
-                print ("storing new cookies for ", flow.request.host, flow.request.port, self.stickyhosts[hid])
+            if not hid in self.stickyhosts:
+                self.stickyhosts[hid] = {}
+            update_server_cookies(self.stickyhosts[hid], flow.response.headers["set-cookie"])
+            flow.response.headers["set-cookie"] = copy.copy(self.stickyhosts[hid].values())
+            #self.stickyhosts[hid] = flow.response.headers["set-cookie"]
+            print ("storing new cookies for ", flow.request.host, flow.request.port, self.stickyhosts[hid])
         elif last_cookies_sent:
             print ("returning old cookies for ", flow.request.host, flow.request.port, self.stickyhosts[hid])
             flow.response.headers["set-cookie"] = last_cookies_sent
